@@ -62,7 +62,17 @@ sudo docker run -d \
 - **`SKIP_DOMAIN_VALIDATION`:** AIO validates the domain from the public internet, which can't reach a tailnet-only name.
 - **No ports 80 or 8443 published:** those are only needed when AIO requests its own Let's Encrypt certificate.
 
-### 4. Initial configuration
+### 4. Split-horizon DNS in Pi-hole
+After setup, one desktop got `ERR_CONNECTION_CLOSED`. `nslookup` showed the server's MagicDNS name resolving to **Tailscale's public Funnel relays**, not the server. Funnel publishes the hostname in public DNS, and that desktop uses Pi-hole directly with Tailscale DNS off. The relay only forwards the Funnel port (8443), so it dropped the 443 connection to Nextcloud.
+
+The fix was local DNS records in Pi-hole that answer the name with the server's tailnet IPv4 and IPv6 addresses:
+```bash
+sudo docker exec pihole pihole-FTL --config dns.hosts '["<server-tailscale-ipv4> <server>.<tailnet>.ts.net", "<server-tailscale-ipv6> <server>.<tailnet>.ts.net"]'
+sudo docker restart pihole    # clear cached upstream answers
+```
+Devices on the home DNS now reach Nextcloud directly over the tailnet, while public users still get the Funnel relay for Jellyfin.
+
+### 5. Initial configuration
 In the AIO interface I set the domain to the server's MagicDNS name, chose the add-ons, and started the containers. Credentials went straight into a password manager.
 
 **Office suite choice:** I picked Euro-Office over Collabora. It has better fidelity with Word, Excel and PowerPoint files, the formats I actually use, and it does more of its rendering in the browser, which is easier on older server hardware. AIO can switch between the two later.
@@ -93,6 +103,8 @@ In the AIO interface I set the domain to the server's MagicDNS name, chose the a
 - **A failed `docker run` still leaves a container behind.** Remove it (`docker rm`) before retrying, or you'll get a name conflict.
 - **AIO without `-d` stays attached to the terminal, and Ctrl+C doesn't detach** (because of `--sig-proxy=false`). Commands typed afterward go into the log stream and never run. Use `-d` and `docker logs -f` instead.
 - **Verify with `tailscale serve status`, not assumptions.** The first time, the Tailscale commands never actually executed, and the Nextcloud address still pointed at Jellyfin.
+- **Funnel changes public DNS for the whole hostname.** Clients that don't use Tailscale DNS need a local override, or tailnet-only services on that name break.
+- **Pi-hole merges cached upstream answers with a new local record** until the cache is cleared. A non-authoritative `nslookup` answer means the local record isn't being used.
 - **Moving a public service's port breaks existing links.** Jellyfin's remote URL changed to include `:8443`, so I updated it for the remote user.
 
 ## Verification
@@ -100,6 +112,7 @@ In the AIO interface I set the domain to the server's MagicDNS name, chose the a
 sudo docker ps --format '{{.Names}}: {{.Status}}'   # all nextcloud-aio-* containers healthy
 tailscale serve status                             # :443 → 11000 (tailnet only), :8443 → 8096 (Funnel)
 sudo ss -tlnp | grep -E ':(80|443|8080|8081)\b'     # no unexpected listeners
+nslookup <server>.<tailnet>.ts.net                  # only the server's tailnet IPs
 ```
 
 ## Next improvements

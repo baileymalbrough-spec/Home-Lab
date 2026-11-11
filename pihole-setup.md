@@ -72,6 +72,14 @@ services:
 ### Settings migration
 **Settings → Teleporter → Export** on the old instance, then **Import** on the new one, then **Tools → Update Gravity**. Teleporter carries over config, blocklists, clients and groups, but not query history.
 
+## Local DNS records (split-horizon)
+The server publishes one service to the internet through Tailscale Funnel, which makes public DNS answer its MagicDNS name with Tailscale's relay addresses. Pi-hole overrides that name with the server's tailnet IPv4 and IPv6 addresses, so home devices reach tailnet-only services such as [Nextcloud](nextcloud-setup.md) directly:
+```bash
+sudo docker exec pihole pihole-FTL --config dns.hosts '["<server-tailscale-ipv4> <server>.<tailnet>.ts.net", "<server-tailscale-ipv6> <server>.<tailnet>.ts.net"]'
+sudo docker restart pihole
+```
+The setting is saved in Pi-hole's config volume, so it persists across restarts.
+
 ## Router (Deco) settings
 - **DHCP → Primary DNS:** the Pi-hole server's IP
 - **Address reservation** for the server, so its IP never changes
@@ -100,6 +108,7 @@ ipconfig /all                           # DNS Servers should show the Pi-hole IP
 - **"Could not resolve host" on Ubuntu during setup:** the server still held a stale ISP IPv6 DNS server from before IPv6 was turned off on the router. Fixed by restarting networking (`nmcli networking off && nmcli networking on`) and confirming with `resolvectl status`.
 - **Streaming app buffers forever:** some blocked analytics domains (e.g. Conviva) can break playback. Allowlist the domain if that happens.
 - **Another service can't bind port 80 or 443:** Pi-hole's web server holds them by default. `sudo ss -tlnp` shows `pihole-FTL` as the owner. Fixed with `FTLCONF_webserver_port`.
+- **A local record returns old and new IPs mixed together:** Pi-hole still had the upstream answer cached. Restarting the container cleared it.
 - **Whole-house DNS outage after a reboot:** see the Tailscale doc. An OS update re-enabled the systemd-resolved stub listener and blocked Pi-hole from binding port 53.
 
 ## Next improvements
