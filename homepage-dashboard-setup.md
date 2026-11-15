@@ -56,7 +56,11 @@ flowchart LR
 | Related ports | 3001 Uptime Kuma (planned) · 3002 ntopng · 3003 What's Up Docker · 127.0.0.1:8099 apt status |
 | RAM use | about 100–150 MB for Homepage, plus a small amount for WUD and busybox |
 
-**Placeholders used below:** `<server-hostname>` is the server's Tailscale machine name, `<tailnet>` is the tailnet's `*.ts.net` domain, and `<server-tailnet-ip>` is the server's `100.x` Tailscale address.
+**Placeholders used below:**
+- `<server-hostname>`: the server's Tailscale machine name
+- `<tailnet>`: the tailnet's `*.ts.net` domain
+- `<server-tailnet-ip>`: the server's `100.x` Tailscale address
+- `<user>`: the Linux username
 
 ---
 
@@ -340,9 +344,10 @@ printf 'HOMEPAGE_VAR_WUD_USER=admin\nHOMEPAGE_VAR_WUD_PASS=%s\n' "$WUD_PASS" >> 
 ```
 
 ### 3. apt check script (`/usr/local/bin/apt-status.sh`)
+Cron runs this as root, so use the full path (not `~`).
 ```bash
 #!/bin/bash
-OUT=$HOME_DIR/updates/apt/status.json      # set to the real path, e.g. /home/<user>/updates/apt/status.json
+OUT=/home/<user>/updates/apt/status.json
 apt-get update -qq >/dev/null 2>&1
 LIST=$(apt list --upgradable 2>/dev/null | tail -n +2)
 PKGS=$(printf '%s\n' "$LIST" | grep -c .)
