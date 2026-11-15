@@ -1,84 +1,117 @@
-# Homepage Dashboard Setup — Home Lab
+# Home Lab Dashboard with Homepage
 
-_Deployed Nov 15, 2026. One portal for every Home Lab service (the dashboard style from the CodeWarr1or TikTok is [Homepage](https://gethomepage.dev)). It runs in Docker on the XPS next to everything else. This doc matches what's actually running. Use it to check settings or rebuild._
+A single self-hosted portal for every service in my home lab. It shows live stats from the DNS filter, VPN, media server and private cloud, up/down status for the network and security tools, and **pending updates** for every container and OS package. It's built with [Homepage](https://gethomepage.dev) running in Docker on an Ubuntu server.
 
-## Overview
-- **What it is:** a fast dashboard driven by YAML files. Each service gets a tile with a link, an up/down dot and, where supported, live stats.
-- **Host:** Ubuntu PC (Dell XPS 8700), `192.168.68.56`, Docker with **host networking**
-- **URLs:**
-  - At home: `http://192.168.68.56:3000`
-  - Tailnet: `http://bailey-malbrough-xps-8700:3000`
-- **Port map neighbors:** 3000 Homepage · 3001 Uptime Kuma (planned) · 3002 ntopng
-- **RAM cost:** about 100–150 MB
-- **Adding a service** = paste one block into `config/services.yaml` and refresh. No restart is needed for YAML changes; changes to `.env` or the compose file need `docker compose up -d`.
+![Dashboard screenshot](./images/homepage-dashboard.png)
+<!-- Screenshot: blur any Tailscale IPs before committing -->
 
-## Status (Nov 15, 2026): all tiles working ✅
+## What it does
+- **One page for everything:** each service is a tile with a link, a live up/down indicator and, where supported, real-time stats.
+- **Live widgets:**
+  - Pi-hole: queries, blocked %, blocklist size
+  - Tailscale: node address, last seen, update available
+  - Jellyfin: library counts, active streams
+  - Nextcloud: free space, users, files, shares
+- **Update tracking:**
+  - **Docker Images:** container image updates via What's Up Docker
+  - **Ubuntu Packages:** apt updates, security updates, reboot pending
+- **Server health bar:** CPU, RAM, disk and uptime of the host.
+- **Extensible:** a new service is one YAML block, with no restart needed.
 
-| Group | Tile | What it shows | Link |
-|---|---|---|---|
-| Network | Pi-hole | queries, blocked (%), gravity | `http://192.168.68.56:8081/admin` |
-| Network | Tailscale (XPS) | tailnet address, last seen, update available | Tailscale admin console |
-| Network | ntopng | container up/down (Homepage has no ntopng widget) | `http://192.168.68.56:3002` |
-| Network | Deco router | ping up/down | `http://192.168.68.1` |
-| Media | Jellyfin | movies/series/episodes/songs counts, now playing | `http://192.168.68.56:8096` |
-| Cloud | Nextcloud | free space, active users, files, shared items | `https://bailey-malbrough-xps-8700.tailbe32a5.ts.net` |
-| Cloud | Nextcloud AIO | container up/down | `https://192.168.68.56:8080` |
-| Security | Wazuh | site up/down (no official widget) | `https://192.168.68.56:5601` |
+## Architecture
 
-Top bar: XPS CPU / RAM / disk / uptime, date/time and a search box. Bookmarks: Tailscale console, Deco, GS108Ev4 switch.
+```mermaid
+flowchart LR
+  User[Browser · LAN or Tailscale] -->|:3000| HP[Homepage container<br/>host networking]
+  HP -->|API · app password| PH[Pi-hole v6 :8081]
+  HP -->|API · access token| TS[Tailscale API · cloud]
+  HP -->|API · API key| JF[Jellyfin :8096]
+  HP -->|serverinfo · NC-Token| NC[Nextcloud AIO<br/>behind tailscale serve]
+  HP -->|API · basic auth| WUD[What's Up Docker :3003]
+  HP -->|JSON :8099| APT[apt-status · cron script]
+  HP -->|read-only Docker socket| D[(Docker: container status)]
+  HP -->|ping / HTTP check| X[Router · ntopng · Wazuh]
+  WUD -->|digest checks| REG[(Container registries)]
+```
 
-Notes from first launch:
-- **Jellyfin shows 0 everywhere.** That's accurate: Jellyfin is used for IPTV live TV, and channels don't count as library items. To hide the row: `sed -i 's/enableBlocks: true/enableBlocks: false/' ~/homepage/config/services.yaml`
-- **Pi-hole was blocking 49%.** That's high; a typical home is 10–25%. Check **Top Blocked Domains / Top Clients** in Pi-hole; the LG TV's `alphonso.tv` is the likely cause.
-- **The Tailscale tile shows "Update available"** for the XPS. After updating, run the verification block in `tailscale-setup.md`, because the Nov 7 outage followed an update.
+| Group | Tile | Data shown |
+|---|---|---|
+| Network | Pi-hole | queries, blocked (%), gravity |
+| Network | Tailscale | tailnet address, last seen, update available |
+| Network | ntopng | container status |
+| Network | Router | ping status |
+| Media | Jellyfin | movies / series / episodes / songs, now playing |
+| Cloud | Nextcloud | free space, active users, files, shares |
+| Cloud | Nextcloud AIO | container status |
+| Security | Wazuh SIEM | HTTP status |
+| Updates | Docker Images | containers monitored, updates available |
+| Updates | Ubuntu Packages | pending updates, security updates, reboot needed, last checked |
+
+## Environment
+| Item | Value |
+|---|---|
+| Host | Dell XPS 8700, Ubuntu, Docker |
+| Server LAN IP | `192.168.68.56` |
+| Dashboard | `http://192.168.68.56:3000` (LAN) or `http://<server-hostname>:3000` (Tailscale) |
+| Related ports | 3001 Uptime Kuma (planned) · 3002 ntopng · 3003 What's Up Docker · 127.0.0.1:8099 apt status |
+| RAM use | about 100–150 MB for Homepage, plus a small amount for WUD and busybox |
+
+**Placeholders used below:** `<server-hostname>` is the server's Tailscale machine name, `<tailnet>` is the tailnet's `*.ts.net` domain, and `<server-tailnet-ip>` is the server's `100.x` Tailscale address.
 
 ---
 
-## Files
+## Part 1: Dashboard
 
-All under `/home/bailey-malbrough/homepage/`. Write files with a heredoc (`cat > file <<'EOF'` … `EOF`) or `nano`. Pasting raw YAML at the prompt just runs each line as a command.
+All files live in `~/homepage/`. Write them with a heredoc (`cat > file <<'EOF'` … `EOF`) or `nano`.
 
-### `docker-compose.yml`
+### 1. `docker-compose.yml`
 ```yaml
 services:
   homepage:
     image: ghcr.io/gethomepage/homepage:latest
     container_name: homepage
-    network_mode: host                # needed to reach Nextcloud on 127.0.0.1 / the ts.net name
-    env_file: .env                    # API keys live here, never in the YAML
+    network_mode: host                # needed to reach Nextcloud behind tailscale serve
+    env_file: .env                    # secrets stay out of the config files
     environment:
-      # Every hostname:port typed in the browser. Missing one = "Host validation failed".
-      HOMEPAGE_ALLOWED_HOSTS: "192.168.68.56:3000,100.92.19.94:3000,bailey-malbrough-xps-8700:3000,bailey-malbrough-xps-8700.tailbe32a5.ts.net:3000"
+      # Every hostname:port used in the browser. Missing one = "Host validation failed".
+      HOMEPAGE_ALLOWED_HOSTS: "192.168.68.56:3000,<server-tailnet-ip>:3000,<server-hostname>:3000,<server-hostname>.<tailnet>.ts.net:3000"
     volumes:
       - ./config:/app/config
-      - /var/run/docker.sock:/var/run/docker.sock:ro   # container up/down dots
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # container up/down status
     restart: unless-stopped
+    labels:
+      - wud.watch=true
+      - wud.watch.digest=true
 ```
-- **Why host networking:** on Docker's default bridge network, the Nextcloud widget failed with `ENETUNREACH` to the XPS's Tailscale address. Nextcloud's Apache only listens on `127.0.0.1:11000` behind `tailscale serve`, so a bridged container can't reach it. With host networking, Homepage reaches it exactly like the XPS does. There are no `ports:` lines, and Homepage still listens on 3000.
-- **Security note:** the Docker socket is mounted read-only, but socket access is still powerful. Keep Homepage LAN/tailnet only, never on Funnel.
-- After Nginx Proxy Manager is set up, add `home.bailey-lab.duckdns.org` to `HOMEPAGE_ALLOWED_HOSTS`.
 
-### `.env` (secrets: `chmod 600`, listed in `.gitignore`)
+### 2. `.env` (secrets)
 ```ini
 HOMEPAGE_VAR_PIHOLE_KEY=
 HOMEPAGE_VAR_JELLYFIN_KEY=
 HOMEPAGE_VAR_NEXTCLOUD_TOKEN=
 HOMEPAGE_VAR_TAILSCALE_DEVICE=
 HOMEPAGE_VAR_TAILSCALE_KEY=
+HOMEPAGE_VAR_WUD_USER=
+HOMEPAGE_VAR_WUD_PASS=
 ```
-Homepage replaces `{{HOMEPAGE_VAR_NAME}}` in the YAML with these values. All keys are also stored in Bitwarden under **"Homepage API keys"**.
+```bash
+chmod 600 ~/homepage/.env
+echo ".env" > ~/homepage/.gitignore
+```
+Homepage substitutes `{{HOMEPAGE_VAR_NAME}}` in the YAML with these values, so the config files can be published safely. The source of truth for every key is a password manager (Bitwarden).
 
-| Key | Where it comes from | Expires? |
+| Key | How to create it | Expires |
 |---|---|---|
-| Pi-hole | **Settings → Web interface / API → Expert → Configure app password.** Copy it, then click **Enable new app password**. Check it saved: `docker exec pihole pihole-FTL --config webserver.api.app_pwhash` prints a hash. | No |
-| Jellyfin | **Dashboard → API Keys → +**, named `homepage` | No |
-| Nextcloud | `TOKEN=$(openssl rand -hex 24)` then `sudo docker exec --user www-data nextcloud-aio-nextcloud php occ config:app:set serverinfo token --value "$TOKEN"`, then `sed -i "s/^HOMEPAGE_VAR_NEXTCLOUD_TOKEN=.*/HOMEPAGE_VAR_NEXTCLOUD_TOKEN=$TOKEN/" ~/homepage/.env` | No |
-| Tailscale device ID | Admin → Machines → `bailey-malbrough-xps-8700` → Machine Details → **ID** (ends in `CNTRL`) | No |
-| Tailscale API token | Admin → Settings → Keys → **Generate access token**, named `homepage`, 90 days | **Yes, ~Feb 13, 2027.** A scheduled Claude reminder fires **Feb 8, 2027, 12:15 PM** with the replacement steps. |
+| Pi-hole | **Settings → Web interface / API → Expert → Configure app password**, then click **Enable new app password**. Verify with `docker exec pihole pihole-FTL --config webserver.api.app_pwhash`. | No |
+| Jellyfin | **Dashboard → API Keys → +** (a dedicated `homepage` key) | No |
+| Nextcloud | `TOKEN=$(openssl rand -hex 24)`, then `sudo docker exec --user www-data nextcloud-aio-nextcloud php occ config:app:set serverinfo token --value "$TOKEN"`, then `sed -i "s/^HOMEPAGE_VAR_NEXTCLOUD_TOKEN=.*/HOMEPAGE_VAR_NEXTCLOUD_TOKEN=$TOKEN/" ~/homepage/.env` | No |
+| Tailscale device ID | Admin console → Machines → server → Machine Details → **ID** (ends in `CNTRL`) | No |
+| Tailscale API token | Admin console → Settings → Keys → **Generate access token** | **Yes, 90 days max.** A rotation reminder is scheduled 5 days before expiry. |
+| WUD user / password | Same values as WUD's admin login (Part 2) | No |
 
-### `config/settings.yaml`
+### 3. `config/settings.yaml`
 ```yaml
-title: Bailey's Home Lab
+title: Home Lab
 theme: dark
 color: slate
 headerStyle: boxed
@@ -97,15 +130,18 @@ layout:
   Security:
     style: row
     columns: 2
+  Updates:
+    style: row
+    columns: 2
 ```
 
-### `config/docker.yaml`
+### 4. `config/docker.yaml`
 ```yaml
 xps:
   socket: /var/run/docker.sock
 ```
 
-### `config/services.yaml`
+### 5. `config/services.yaml`
 ```yaml
 - Network:
     - Pi-hole:
@@ -122,7 +158,7 @@ xps:
     - Tailscale:
         icon: tailscale.png
         href: https://login.tailscale.com/admin/machines
-        description: Subnet router + exit node (XPS)
+        description: Subnet router + exit node
         widget:
           type: tailscale
           deviceid: "{{HOMEPAGE_VAR_TAILSCALE_DEVICE}}"
@@ -134,7 +170,7 @@ xps:
         description: Live traffic monitoring
         server: xps
         container: ntopng
-    - Deco Router:
+    - Router:
         icon: tp-link.png
         href: http://192.168.68.1
         description: TP-Link Deco AX1500
@@ -151,20 +187,20 @@ xps:
           type: jellyfin
           url: http://192.168.68.56:8096
           key: "{{HOMEPAGE_VAR_JELLYFIN_KEY}}"
-          version: 2                  # required: Jellyfin 12.4.0 removed the old /emby endpoints
+          version: 2                  # Jellyfin 10.12+ (tested on 12.4.0) dropped the /emby endpoints
           enableBlocks: true
           enableNowPlaying: true
 
 - Cloud:
     - Nextcloud:
         icon: nextcloud.png
-        href: https://bailey-malbrough-xps-8700.tailbe32a5.ts.net
+        href: https://<server-hostname>.<tailnet>.ts.net
         description: Files, photos, calendar
         server: xps
         container: nextcloud-aio-nextcloud
         widget:
           type: nextcloud
-          url: https://bailey-malbrough-xps-8700.tailbe32a5.ts.net
+          url: https://<server-hostname>.<tailnet>.ts.net
           key: "{{HOMEPAGE_VAR_NEXTCLOUD_TOKEN}}"
     - Nextcloud AIO:
         icon: nextcloud-blue.png
@@ -179,12 +215,44 @@ xps:
         href: https://192.168.68.56:5601
         description: SIEM · alerts and vulnerability detection
         siteMonitor: https://192.168.68.56:5601
+
+- Updates:
+    - Docker Images:
+        icon: whats-up-docker.png
+        href: http://192.168.68.56:3003
+        description: Container image updates
+        server: xps
+        container: wud
+        widget:
+          type: whatsupdocker
+          url: http://127.0.0.1:3003
+          username: "{{HOMEPAGE_VAR_WUD_USER}}"
+          password: "{{HOMEPAGE_VAR_WUD_PASS}}"
+    - Ubuntu Packages:
+        icon: si-ubuntu-#E95420
+        description: OS, Docker, Tailscale, Wazuh agent (apt)
+        widget:
+          type: customapi
+          url: http://127.0.0.1:8099/status.json
+          refreshInterval: 300000
+          mappings:
+            - field: packages
+              label: Updates
+              format: number
+            - field: security
+              label: Security
+              format: number
+            - field: reboot
+              label: Reboot needed
+            - field: checked
+              label: Checked
+              format: relativeDate
 ```
 
-### `config/widgets.yaml`
+### 6. `config/widgets.yaml`
 ```yaml
 - resources:
-    label: XPS 8700
+    label: Server
     cpu: true
     memory: true
     disk: /
@@ -198,115 +266,182 @@ xps:
     provider: duckduckgo
     target: _blank
 ```
-To add weather later, put an `openmeteo` block here with your home's latitude/longitude, `timezone: America/Chicago` and `units: imperial`.
 
-### `config/bookmarks.yaml`
+### 7. `config/bookmarks.yaml`
 ```yaml
 - Admin:
     - Tailscale Console:
         - abbr: TS
           href: https://login.tailscale.com/admin
-    - Deco:
-        - abbr: DC
+    - Router:
+        - abbr: RT
           href: http://192.168.68.1
-    - GS108Ev4 Switch:
+    - Switch:
         - abbr: SW
           href: http://192.168.68.52
 ```
 
-## Future tiles (add to `services.yaml` as each roadmap step lands)
-```yaml
-- Management:
-    - Portainer:
-        icon: portainer.png
-        href: https://192.168.68.56:9443
-        server: xps
-        container: portainer
-        widget:
-          type: portainer
-          url: https://192.168.68.56:9443
-          env: 1
-          key: "{{HOMEPAGE_VAR_PORTAINER_KEY}}"     # Portainer → My account → Access tokens
-    - Uptime Kuma:
-        icon: uptime-kuma.png
-        href: http://192.168.68.56:3001
-        widget:
-          type: uptimekuma
-          url: http://192.168.68.56:3001
-          slug: homelab                           # status page slug
-    - Nginx Proxy Manager:
-        icon: nginx-proxy-manager.png
-        href: http://192.168.68.56:81
-        widget:
-          type: npm
-          url: http://192.168.68.56:81
-          username: "{{HOMEPAGE_VAR_NPM_USER}}"
-          password: "{{HOMEPAGE_VAR_NPM_PASS}}"
-    - Vaultwarden:
-        icon: vaultwarden.png
-        href: https://vault.bailey-lab.duckdns.org
-        server: xps
-        container: vaultwarden
-    - Home Assistant:
-        icon: home-assistant.png
-        href: http://<ha-ip>:8123
-        widget:
-          type: homeassistant
-          url: http://<ha-ip>:8123
-          key: "{{HOMEPAGE_VAR_HA_TOKEN}}"         # HA profile → Long-lived access tokens
-```
-Add a `Management:` entry to `settings.yaml` → `layout` when you use this group.
-
-## Verification
+### 8. Start
 ```bash
-docker ps --format '{{.Names}}  {{.Status}}' | grep homepage
-sudo ss -tlnp | grep 3000
-docker logs --tail 20 homepage          # no "error:" lines
+cd ~/homepage && docker compose up -d
+docker logs --tail 20 homepage
 ```
-- [x] Every tile has a green dot (Tailscale has no dot because it isn't a container; its widget data is the check)
-- [x] Pi-hole, Tailscale, Jellyfin and Nextcloud widgets show data
-- [ ] Opens from the Pixel 8 on cellular via `http://bailey-malbrough-xps-8700:3000`
-- [ ] Add an Uptime Kuma HTTP monitor for `http://192.168.68.56:3000` once Kuma is installed
+YAML edits apply on page refresh. Changes to `.env` or the compose file need `docker compose up -d`.
 
-## Troubleshooting (all hit during the Nov 15 deploy)
-- **"Host validation failed":** the address in the browser isn't in `HOMEPAGE_ALLOWED_HOSTS`. Add it with `:3000`, then `docker compose up -d`.
-- **Pi-hole "API Error", log says `Failed to login to Pi-Hole API, status: 401`:** the app password was copied but never activated. Test the key without printing it:
-  ```bash
-  source <(grep PIHOLE_KEY ~/homepage/.env)
-  curl -s -X POST http://192.168.68.56:8081/api/auth -H 'Content-Type: application/json' \
-    -d "{\"password\":\"$HOMEPAGE_VAR_PIHOLE_KEY\"}" | grep -o '"valid":[a-z]*'
-  ```
-  `"valid":false` means you need to generate a new one, click **Enable new app password**, and update `.env`.
-- **Jellyfin "API Error", log shows `HTTP Error 404 calling .../emby/Sessions`:** the widget is using old endpoints. Add `version: 2`. Check with `curl -s -o /dev/null -w '%{http_code}\n' http://192.168.68.56:8096/emby/System/Info/Public` (404 = needs v2).
-- **Nextcloud "API Error", log shows `ENETUNREACH fd7a:...:443` / `HTTP Error 500`:** the container can't reach the ts.net address from Docker's bridge network. Fixed with `network_mode: host`. Test the token directly:
-  ```bash
-  curl -s -H "NC-Token: $(grep NEXTCLOUD_TOKEN ~/homepage/.env | cut -d= -f2)" \
-    "https://bailey-malbrough-xps-8700.tailbe32a5.ts.net/ocs/v2.php/apps/serverinfo/api/v1/info?format=json" | head -c 200
-  ```
-  `"status":"ok"` = the token is good.
-- **Gray dashes on a widget:** it's still loading. Nextcloud's first response is slow. Hard refresh with Ctrl+F5.
-- **Tailscale `HTTP Error 404 calling .../device/`:** the device ID is empty or wrong. After about 90 days, an error here means the token expired.
-- **Check a key loaded without printing it:** `docker exec homepage printenv HOMEPAGE_VAR_<NAME> | wc -c` (more than 1 = loaded).
-- **Wazuh dot turns red while it's actually up:** the self-signed certificate can trip `siteMonitor`. Swap it for `server: xps` + `container: <name from docker ps | grep -i wazuh>`.
+---
 
-## Wall tablet idea
-The Galaxy Tab S6 Lite (planned HA wall panel) can show this dashboard: open `http://192.168.68.56:3000` in Chrome → **Add to Home screen**, or use Fully Kiosk Browser.
+## Part 2: Update tracking
 
-## Portfolio write-up
-- Screenshot the full dashboard (blur the Tailscale IPs if posting publicly).
-- Commit `docker-compose.yml` and `config/*.yaml` to the `HomeLab` repo. `.env` stays out via `.gitignore`.
-- Talking points:
-  - single pane of glass
-  - secrets kept in environment variables instead of hard-coded, with Bitwarden as the source of truth
-  - read-only Docker socket
-  - least-privilege, revocable API tokens (Pi-hole app password, a dedicated Jellyfin key, Nextcloud serverinfo token)
-  - scheduled rotation of the expiring Tailscale token
-  - troubleshooting from logs: reading 401 vs 404 vs ENETUNREACH to find three different root causes
+Two sources, because there are two kinds of software on the server:
 
-## To-do
-- [ ] Update Tailscale on the XPS, then run the verification block in `tailscale-setup.md`
-- [ ] Look into the 49% Pi-hole block rate
-- [ ] Optional: hide the Jellyfin counts row and add a weather widget
-- [ ] Rotate the Tailscale API token around Feb 8–13, 2027 (reminder scheduled)
-- [ ] Add Portainer / Uptime Kuma / NPM / Vaultwarden tiles as each roadmap step lands
-- [ ] After NPM: add a `home.` proxy host and update `HOMEPAGE_ALLOWED_HOSTS`
+| Tile | Covers | Method |
+|---|---|---|
+| Docker Images | Pi-hole, Jellyfin, ntopng, Redis, Homepage, WUD | **What's Up Docker (WUD)**, which detects updates only and never installs them |
+| Ubuntu Packages | OS, Docker Engine, Tailscale, Wazuh agent | A cron script writes `status.json`; Homepage reads it with the `customapi` widget |
+
+**Not tracked on purpose:** Nextcloud AIO, which updates its own containers from its admin page. Updating them by hand can break it.
+
+### 1. `~/updates/docker-compose.yml`
+```yaml
+services:
+  wud:
+    image: getwud/wud:latest
+    container_name: wud
+    env_file: .env                                # admin login (WUD 9.x requires one)
+    ports:
+      - "3003:3000"                               # WUD defaults to 3000, which Homepage uses
+    environment:
+      - TZ=America/Chicago
+      - WUD_WATCHER_LOCAL_WATCHBYDEFAULT=false    # opt-in: only containers labeled wud.watch=true
+      - WUD_WATCHER_LOCAL_CRON=0 */6 * * *        # check every 6 hours
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./wud:/store
+    labels:
+      - wud.watch=true
+    restart: unless-stopped
+  apt-status:
+    image: busybox:latest
+    container_name: apt-status
+    network_mode: host
+    command: httpd -f -p 127.0.0.1:8099 -h /www   # serves status.json on localhost only
+    volumes:
+      - ./apt:/www:ro
+    restart: unless-stopped
+```
+
+### 2. WUD admin login (`~/updates/.env`)
+```bash
+WUD_PASS=$(openssl rand -base64 18 | tr -d '/+=')
+echo "WUD password: $WUD_PASS"        # store in the password manager
+printf 'WUD_AUTH_ADMIN_USER=admin\nWUD_AUTH_ADMIN_PASSWORD=%s\n' "$WUD_PASS" > ~/updates/.env
+chmod 600 ~/updates/.env && echo ".env" > ~/updates/.gitignore
+printf 'HOMEPAGE_VAR_WUD_USER=admin\nHOMEPAGE_VAR_WUD_PASS=%s\n' "$WUD_PASS" >> ~/homepage/.env
+```
+
+### 3. apt check script (`/usr/local/bin/apt-status.sh`)
+```bash
+#!/bin/bash
+OUT=$HOME_DIR/updates/apt/status.json      # set to the real path, e.g. /home/<user>/updates/apt/status.json
+apt-get update -qq >/dev/null 2>&1
+LIST=$(apt list --upgradable 2>/dev/null | tail -n +2)
+PKGS=$(printf '%s\n' "$LIST" | grep -c .)
+SEC=$(printf '%s\n' "$LIST" | grep -c -- '-security')
+REBOOT=$([ -f /var/run/reboot-required ] && echo Yes || echo No)
+printf '{"packages":%d,"security":%d,"reboot":"%s","checked":"%s"}\n' \
+  "$PKGS" "$SEC" "$REBOOT" "$(date -Iseconds)" > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
+```
+```bash
+sudo chmod 755 /usr/local/bin/apt-status.sh
+echo '17 */6 * * * root /usr/local/bin/apt-status.sh' | sudo tee /etc/cron.d/apt-status
+sudo /usr/local/bin/apt-status.sh && cat ~/updates/apt/status.json
+# {"packages":14,"security":0,"reboot":"Yes","checked":"..."}
+```
+It only checks for updates and never installs them. The temp-file-then-`mv` step keeps Homepage from ever reading a half-written file.
+
+### 4. Opt containers in to WUD
+WUD tracks image checksums (digest watching) by default, **except for Docker Hub images**. Most of these services use Docker Hub `latest` tags, so each needs both labels:
+```yaml
+    labels:
+      - wud.watch=true
+      - wud.watch.digest=true
+```
+To add them to every compose project at once (backs up each file, validates before restarting):
+```bash
+for d in $(for c in pihole ntopng homepage jellyfin; do docker inspect $c --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' 2>/dev/null; done | sort -u); do
+  cp "$d/docker-compose.yml" "$d/docker-compose.yml.bak"
+  sed -i 's/^    restart: unless-stopped$/    restart: unless-stopped\n    labels:\n      - wud.watch=true\n      - wud.watch.digest=true/' "$d/docker-compose.yml"
+  (cd "$d" && docker compose config -q && docker compose up -d)
+done
+```
+Restarting Pi-hole interrupts household DNS for about 10 seconds.
+
+### 5. Start and test
+```bash
+cd ~/updates && docker compose up -d
+docker ps --filter name=wud --format '{{.Status}}'                       # Up, not Restarting
+curl -s -o /dev/null -w '%{http_code}\n' -u "admin:$WUD_PASS" http://127.0.0.1:3003/api/containers   # 200
+curl -s http://127.0.0.1:8099/status.json
+```
+The WUD web UI at `http://192.168.68.56:3003` lists exactly which containers have updates.
+
+### Applying updates (manual, on my schedule)
+- **Containers:** `cd <service folder> && docker compose pull && docker compose up -d`
+- **Ubuntu packages:** `sudo apt upgrade`, then reboot if the tile says so, then run the post-reboot checks (DNS, Tailscale interface, `docker ps`). The server is the network's DNS resolver, so a bad reboot affects the whole house.
+
+---
+
+## Problems solved during deployment
+
+Each widget failed for a different reason. Reading the HTTP status or startup error in the logs pointed to each root cause.
+
+| Symptom | Log evidence | Root cause | Fix |
+|---|---|---|---|
+| Pi-hole "API Error" | `Failed to login to Pi-Hole API, status: 401` | App password was generated but never activated | Click **Enable new app password**; verify the hash exists |
+| Jellyfin "API Error" | `HTTP Error 404 calling .../emby/Sessions` | Newer Jellyfin removed the legacy `/emby` endpoints | `version: 2` in the widget |
+| Nextcloud "API Error" | `ENETUNREACH fd7a:...:443`, `HTTP Error 500` | Nextcloud listens only on localhost behind `tailscale serve`, which a bridge-networked container can't reach | `network_mode: host` |
+| Tailscale "API Error" | `HTTP Error 404 calling .../device/` | Device ID not set yet | Add the ID ending in `CNTRL` |
+| Docker Images "API Error", orange dot, WUD `Restarting` | `Authentication is mandatory: No administrator user found` | WUD 9.x refuses to start without an admin login | Set `WUD_AUTH_ADMIN_USER` / `WUD_AUTH_ADMIN_PASSWORD`; pass the same credentials to the widget |
+| Ubuntu tile shows a broken image | n/a | `ubuntu.png` isn't in the icon set | Use Simple Icons: `si-ubuntu-#E95420` |
+
+**Test commands (no secrets printed):**
+```bash
+# Is a key loaded in the container? (>1 = yes)
+docker exec homepage printenv HOMEPAGE_VAR_PIHOLE_KEY | wc -c
+
+# Does Pi-hole accept the key?
+source <(grep PIHOLE_KEY ~/homepage/.env)
+curl -s -X POST http://192.168.68.56:8081/api/auth -H 'Content-Type: application/json' \
+  -d "{\"password\":\"$HOMEPAGE_VAR_PIHOLE_KEY\"}" | grep -o '"valid":[a-z]*'
+
+# Does Jellyfin still serve legacy endpoints? (404 = use version: 2)
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.68.56:8096/emby/System/Info/Public
+
+# Does the Nextcloud token work?
+curl -s -H "NC-Token: $(grep NEXTCLOUD_TOKEN ~/homepage/.env | cut -d= -f2)" \
+  "https://<server-hostname>.<tailnet>.ts.net/ocs/v2.php/apps/serverinfo/api/v1/info?format=json" | head -c 200
+```
+
+**Other tips:**
+- **"Host validation failed":** add the exact `host:port` to `HOMEPAGE_ALLOWED_HOSTS`.
+- **Gray dashes on a widget:** it's still loading. Hard refresh with Ctrl+F5.
+- **Wazuh shows red while up:** the self-signed certificate can trip `siteMonitor`. Use a container status check instead.
+- **Pasting YAML into the shell** gives `command not found`. Use a heredoc, `sed`, or an editor.
+- **WUD shows 0 updates for `latest` images:** the container is missing `wud.watch.digest=true`.
+
+## Security decisions
+- **Secrets in `.env` files**, excluded from Git, with a password manager as the source of truth.
+- **Least-privilege, revocable credentials:**
+  - Pi-hole app password instead of the admin password
+  - a dedicated Jellyfin key
+  - a read-only Nextcloud serverinfo token
+- **Read-only Docker socket** for Homepage and WUD. Socket access is still powerful, so the dashboard and WUD stay LAN/Tailscale-only and are never exposed publicly.
+- **Detection, not auto-updating:** WUD and the apt script only report. Updates are applied by hand, so a bad image or kernel never surprises the household's DNS server.
+- **The apt status endpoint is bound to `127.0.0.1`** and isn't reachable from the network.
+- **Planned rotation** of the only expiring credential (the Tailscale API token).
+
+## Roadmap
+- Tiles for Portainer, Uptime Kuma, Nginx Proxy Manager, Vaultwarden and Home Assistant as each is deployed
+- HTTPS name (`home.<domain>`) through Nginx Proxy Manager
+- WUD notifications (Discord or ntfy) when new updates appear
+- Weather widget, and a wall-mounted tablet view
